@@ -1,0 +1,45 @@
+name: Merge uploaded KRX investor CSVs
+
+on:
+  workflow_dispatch:
+    inputs:
+      buy_path:
+        description: "Path to buy CSV in the repo"
+        required: true
+        default: "krx_kospi_investor_buy_amt.csv"
+      sell_path:
+        description: "Path to sell CSV in the repo"
+        required: true
+        default: "krx_kospi_investor_sell_amt.csv"
+      net_path:
+        description: "Path to net CSV in the repo"
+        required: true
+        default: "krx_kospi_investor_net_amt.csv"
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pandas
+
+      - name: Merge files
+        run: python merge_krx_investor_three_files.py
+        env:
+          BUY_PATH: ${{ inputs.buy_path }}
+          SELL_PATH: ${{ inputs.sell_path }}
+          NET_PATH: ${{ inputs.net_path }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: merged-krx-investor-flow
+          path: output/
