@@ -1,46 +1,51 @@
-name: Fetch KOSPI investor flow from KRX
+name: Process uploaded KRX investor flow CSV
 
 on:
   workflow_dispatch:
     inputs:
+      raw_input_path:
+        description: "저장소 안 raw CSV 경로 (예: krx_investor_flow_raw.csv)"
+        required: true
+        default: "krx_investor_flow_raw.csv"
       start_date:
-        description: "조회 시작일 (YYYYMMDD)"
+        description: "시작일 YYYYMMDD"
         required: true
         default: "20250801"
       end_date:
-        description: "조회 종료일 (YYYYMMDD)"
+        description: "종료일 YYYYMMDD"
         required: true
         default: "20260306"
 
 jobs:
-  fetch:
+  process:
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install packages
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run downloader
+      - name: Process uploaded CSV
         env:
-          START_DATE: ${{ inputs.start_date }}
-          END_DATE: ${{ inputs.end_date }}
-        run: python fetch_krx_kospi_investor_flow.py
+          RAW_INPUT_PATH: ${{ github.event.inputs.raw_input_path }}
+          START_DATE: ${{ github.event.inputs.start_date }}
+          END_DATE: ${{ github.event.inputs.end_date }}
+        run: |
+          python process_krx_investor_flow_manual.py
 
-      - name: Upload result files
-        if: always()
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: krx-kospi-investor-flow-${{ inputs.start_date }}-${{ inputs.end_date }}
+          name: processed-krx-investor-flow-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}
           path: output/
-          retention-days: 30
+          if-no-files-found: error
