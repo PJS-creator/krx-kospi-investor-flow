@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import csv
@@ -5,7 +6,7 @@ import os
 import re
 from io import StringIO
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable
 
 import pandas as pd
 
@@ -36,7 +37,6 @@ def _normalize_text(x: object) -> str:
 def _read_text(path: Path) -> str:
     raw = path.read_bytes()
 
-    # 명시적인 차단/에러 응답 감지
     raw_head = raw[:5000].decode("utf-8", errors="ignore")
     if "LOGOUT" in raw_head.upper():
         raise RuntimeError(
@@ -48,8 +48,7 @@ def _read_text(path: Path) -> str:
             "업로드한 파일이 CSV가 아니라 HTML/에러 페이지입니다. KRX 화면에서 CSV로 다시 다운로드해 주세요."
         )
 
-    encodings = ["utf-8-sig", "cp949", "euc-kr", "utf-8"]
-    for enc in encodings:
+    for enc in ["utf-8-sig", "cp949", "euc-kr", "utf-8"]:
         try:
             return raw.decode(enc)
         except UnicodeDecodeError:
@@ -58,14 +57,8 @@ def _read_text(path: Path) -> str:
 
 
 def _guess_delimiter(sample: str) -> str:
-    comma = sample.count(",")
-    tab = sample.count("\t")
-    semicolon = sample.count(";")
-    if tab > comma and tab > semicolon:
-        return "\t"
-    if semicolon > comma and semicolon > tab:
-        return ";"
-    return ","
+    counts = {",": sample.count(","), "\t": sample.count("\t"), ";": sample.count(";")}
+    return max(counts, key=counts.get) if any(counts.values()) else ","
 
 
 def _ffill(values: Iterable[str]) -> list[str]:
@@ -84,8 +77,7 @@ def _ffill(values: Iterable[str]) -> list[str]:
 def _is_subheader_row(row: list[str]) -> bool:
     labels = {"매도", "매수", "순매수", "매도금액", "매수금액", "순매수금액"}
     normed = [_normalize_text(x) for x in row]
-    hit = sum(1 for x in normed if x in labels)
-    return hit >= 3
+    return sum(1 for x in normed if x in labels) >= 2
 
 
 def _find_header_idx(rows: list[list[str]]) -> int:
@@ -93,12 +85,10 @@ def _find_header_idx(rows: list[list[str]]) -> int:
         normed = [_normalize_text(x) for x in row]
         joined = "|".join(normed)
         if ("일자" in joined or "날짜" in joined) and any(
-            key in joined for key in ["외국인", "개인", "기관", "전체"]
+            key in joined for key in ["외국인", "개인", "기관", "전체", "기타법인"]
         ):
             return i
-    raise RuntimeError(
-        "헤더 행을 찾지 못했습니다. 업로드한 파일이 KRX 투자자별 거래실적 CSV인지 확인해 주세요."
-    )
+    raise RuntimeError("헤더 행을 찾지 못했습니다. 업로드한 파일이 KRX 투자자별 거래실적 CSV인지 확인해 주세요.")
 
 
 def _build_dataframe_from_text(text: str) -> pd.DataFrame:
@@ -112,14 +102,13 @@ def _build_dataframe_from_text(text: str) -> pd.DataFrame:
     h1 = rows[header_idx]
     h2 = rows[header_idx + 1] if header_idx + 1 < len(rows) else []
 
-    # 길이 맞추기
-    ncols = max(len(r) for r in rows[header_idx : min(len(rows), header_idx + 5)])
+    ncols = max(len(r) for r in rows[header_idx:min(len(rows), header_idx + 5)])
+
     def pad(r: list[str]) -> list[str]:
         return r + [""] * (ncols - len(r))
 
     h1 = pad(h1)
     h2 = pad(h2)
-
     use_two_header = _is_subheader_row(h2)
 
     if use_two_header:
@@ -127,6 +116,8 @@ def _build_dataframe_from_text(text: str) -> pd.DataFrame:
         sub = [_normalize_text(x) for x in h2]
         columns = []
         for a, b in zip(top, sub):
+            a = _normalize_text(a)
+            b = _normalize_text(b)
             if b and a and a != b:
                 columns.append(f"{a}_{b}")
             elif a:
@@ -141,24 +132,13 @@ def _build_dataframe_from_text(text: str) -> pd.DataFrame:
     data_rows: list[list[str]] = []
     for row in rows[data_start:]:
         row = pad(row)
-        # 완전 빈 줄은 제외
         if not any(_normalize_text(c) for c in row):
             continue
         data_rows.append(row)
 
     df = pd.DataFrame(data_rows, columns=columns)
-
-    # 의미 없는 칼럼 제거
-    keep_cols = []
-    for c in df.columns:
-        norm = _normalize_text(c)
-        if not norm:
-            continue
-        if norm.startswith("Unnamed"):
-            continue
-        keep_cols.append(c)
-    df = df[keep_cols]
-    return df
+    keep_cols = [c for c in df.columns if _normalize_text(c) and not _normalize_text(c).startswith("Unnamed")]
+    return df[keep_cols]
 
 
 def _pick(df: pd.DataFrame, include: list[str], exclude: list[str] | None = None) -> str | None:
@@ -176,6 +156,7 @@ def _to_num(series: pd.Series) -> pd.Series:
         .str.replace(",", "", regex=False)
         .str.replace(" ", "", regex=False)
         .str.replace("--", "", regex=False)
+        .str.replace('"', "", regex=False)
     )
     return pd.to_numeric(cleaned, errors="coerce")
 
@@ -190,13 +171,27 @@ def _to_date(series: pd.Series) -> pd.Series:
     return pd.to_datetime(s, errors="coerce").dt.strftime("%Y-%m-%d")
 
 
-def _extract(df: pd.DataFrame) -> pd.DataFrame:
-    date_col = _pick(df, ["일자"]) or _pick(df, ["날짜"])
-    if date_col is None:
-        raise RuntimeError(f"날짜 컬럼을 찾지 못했습니다. 실제 컬럼: {list(df.columns)}")
-
+def _base_output(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
     out = pd.DataFrame()
     out["date_kr"] = _to_date(df[date_col])
+    for c in [
+        "foreign_buy_amt",
+        "foreign_sell_amt",
+        "foreign_net_amt",
+        "total_kospi_trading_value",
+        "individual_buy_amt",
+        "individual_sell_amt",
+        "individual_net_amt",
+        "institution_buy_amt",
+        "institution_sell_amt",
+        "institution_net_amt",
+    ]:
+        out[c] = pd.NA
+    return out
+
+
+def _extract_multi_metric(df: pd.DataFrame, date_col: str) -> tuple[pd.DataFrame, dict[str, str | None]]:
+    out = _base_output(df, date_col)
 
     patterns = {
         "foreign_sell_amt": [["외국인합계", "매도"], ["외국인", "매도"]],
@@ -222,26 +217,82 @@ def _extract(df: pd.DataFrame) -> pd.DataFrame:
         found[out_col] = chosen
         if out_col.startswith("_"):
             continue
-        out[out_col] = _to_num(df[chosen]) if chosen else pd.NA
+        if chosen:
+            out[out_col] = _to_num(df[chosen])
 
     total_col = found.get("_total_buy") or found.get("_total_sell")
-    out["total_kospi_trading_value"] = _to_num(df[total_col]) if total_col else pd.NA
+    if total_col:
+        out["total_kospi_trading_value"] = _to_num(df[total_col])
 
-    ordered = [
-        "date_kr",
-        "foreign_buy_amt",
-        "foreign_sell_amt",
-        "foreign_net_amt",
-        "total_kospi_trading_value",
-        "individual_buy_amt",
-        "individual_sell_amt",
-        "individual_net_amt",
-        "institution_buy_amt",
-        "institution_sell_amt",
-        "institution_net_amt",
-    ]
-    out = out[ordered].dropna(subset=["date_kr"]).sort_values("date_kr").reset_index(drop=True)
+    return out, found
 
+
+def _extract_net_only(df: pd.DataFrame, date_col: str) -> tuple[pd.DataFrame, dict[str, str | None]]:
+    out = _base_output(df, date_col)
+
+    found = {
+        "foreign_sell_amt": None,
+        "foreign_buy_amt": None,
+        "foreign_net_amt": _pick(df, ["외국인합계"]) or _pick(df, ["외국인"]),
+        "individual_sell_amt": None,
+        "individual_buy_amt": None,
+        "individual_net_amt": _pick(df, ["개인"]),
+        "institution_sell_amt": None,
+        "institution_buy_amt": None,
+        "institution_net_amt": _pick(df, ["기관합계"]) or _pick(df, ["기관"]),
+        "_total_buy": None,
+        "_total_sell": None,
+    }
+
+    for out_col in ["foreign_net_amt", "individual_net_amt", "institution_net_amt"]:
+        src = found[out_col]
+        if src:
+            out[out_col] = _to_num(df[src])
+
+    total_col = _pick(df, ["전체"])
+    if total_col is not None:
+        total_numeric = _to_num(df[total_col])
+        # 순매수 합계(이론상 0)에 해당하는 컬럼일 가능성이 높으므로,
+        # 거의 전부 0이면 거래대금으로 오인하지 않도록 비워둔다.
+        if (total_numeric.fillna(0).abs() > 0).sum() > 0:
+            # 값이 0이 아닌 경우에도 '전체'가 순매수합계일 가능성이 높아 기본적으로 사용하지 않는다.
+            log("경고: '전체' 컬럼이 있으나 이 파일 형식에서는 보통 순매수 합계(대체로 0)이므로 total_kospi_trading_value로 사용하지 않았습니다.")
+        else:
+            log("참고: 업로드한 파일의 '전체' 컬럼은 전부 0으로, 총 거래대금 컬럼이 아닙니다.")
+    log("참고: 업로드한 CSV는 투자자별 '순매수만' 있는 형식으로 보입니다. 매수/매도/총거래대금은 이 파일만으로 복원할 수 없습니다.")
+
+    return out, found
+
+
+def _extract(df: pd.DataFrame) -> pd.DataFrame:
+    date_col = _pick(df, ["일자"]) or _pick(df, ["날짜"])
+    if date_col is None:
+        raise RuntimeError(f"날짜 컬럼을 찾지 못했습니다. 실제 컬럼: {list(df.columns)}")
+
+    has_metric_headers = any(any(token in _normalize_text(c) for token in ["매도", "매수", "순매수"]) for c in df.columns)
+    net_only_shape = (
+        (_pick(df, ["외국인합계"]) or _pick(df, ["외국인"])) is not None
+        and (_pick(df, ["개인"]) is not None)
+        and ((_pick(df, ["기관합계"]) or _pick(df, ["기관"])) is not None)
+        and not has_metric_headers
+    )
+
+    if has_metric_headers:
+        mode = "multi_metric"
+        out, found = _extract_multi_metric(df, date_col)
+    elif net_only_shape:
+        mode = "net_only"
+        out, found = _extract_net_only(df, date_col)
+    else:
+        raise RuntimeError(
+            "알 수 없는 CSV 형식입니다. 현재 스크립트는 (1) 매수/매도/순매수 3종 컬럼형, "
+            "(2) 투자자별 순매수만 있는 형식을 지원합니다. "
+            f"실제 컬럼: {list(df.columns)}"
+        )
+
+    out = out.dropna(subset=["date_kr"]).sort_values("date_kr").reset_index(drop=True)
+
+    log(f"[감지된 형식] {mode}")
     log("[컬럼 매핑 결과]")
     for k, v in found.items():
         log(f"- {k}: {v}")
